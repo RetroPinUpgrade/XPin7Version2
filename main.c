@@ -73,7 +73,7 @@ uint8_t DisplayTestPhase;
 volatile uint8_t DisplayCache[5][6];
 volatile uint8_t ScoreToBeEvaluated[4][6];
 volatile uint8_t ScoreStable;
-volatile uint8_t StableCount[4];
+volatile uint8_t StableCount[5];
 volatile uint8_t ScoreChanged = 0x00;
 volatile uint8_t ValidDigitsSeen = 0x00;
 volatile uint8_t DisplayTestMode = 0x00;
@@ -547,7 +547,7 @@ void ShowDisplayTest() {
             uint8_t digitToShow = 6-(DisplayTestPhase-10);
             for (uint8_t d = 0; d < 5; d++) {
                 for (uint8_t i = 0; i < 7; i++) {
-                    if (i==digitToShow) DisplayBuffer[d][i] = DisplayTestPhase;
+                    if (i==digitToShow) DisplayBuffer[d][i] = 8;
                     else DisplayBuffer[d][i] = 0x0F;
                 }
             }    
@@ -843,7 +843,7 @@ void __interrupt() MainInterruptHandler(void) {
                         volatile uint8_t *cacheBCDPtr = CachedBCD;
                         volatile uint8_t *lastBCDPtr = (currentDigit<5) ? &DisplayCache[0][currentDigit+1] : NULL;
                         volatile uint8_t *cacheDisplayPtr = &DisplayCache[0][currentDigit];
-                        for (uint8_t displayCount=0; displayCount<4; displayCount++) {
+                        for (uint8_t displayCount=0; displayCount<5; displayCount++) {
                             uint8_t cachedDigit = *cacheBCDPtr;
 
                             // Now check to see if the new digits match
@@ -864,21 +864,23 @@ void __interrupt() MainInterruptHandler(void) {
                                 lastBCDPtr += 6;
                             }
 
-                            // If we still think the buffer is showing a stable score
-                            // then we need to check to see if this next digit invalidates it
-                            if (ValidDigitsSeen & digitsValidMask) {
-                                if (cachedDigit<10) {
-                                    if (currentDigit == 0 && cachedDigit != 0x00) {
-                                        // We're going to assume that a valid score
-                                        // requires the last digit to be 0.
-                                        // I don't know of a 6-digit Bally/Stern game where that's not true
-                                        ValidDigitsSeen &= ~digitsValidMask; // Invalidate if 1s digit is not 0
+                            if (displayCount<4) {
+                                // Now, for the player scores only, we can check if the 
+                                // digits we're seeing are valid
+                                if (ValidDigitsSeen & digitsValidMask) {
+                                    if (cachedDigit<10) {
+                                        if (currentDigit == 0 && cachedDigit != 0x00) {
+                                            // We're going to assume that a valid score
+                                            // requires the last digit to be 0.
+                                            // I don't know of a 6-digit Bally/Stern game where that's not true
+                                            ValidDigitsSeen &= ~digitsValidMask; // Invalidate if 1s digit is not 0
+                                        } else {
+                                            ValidDigitsSeen |= digitsStartedMask;
+                                        }
                                     } else {
-                                        ValidDigitsSeen |= digitsStartedMask;
-                                    }
-                                } else {
-                                    if ((ValidDigitsSeen & digitsStartedMask) || (currentDigit<=1)) {
-                                        ValidDigitsSeen &= ~digitsValidMask;
+                                        if ((ValidDigitsSeen & digitsStartedMask) || (currentDigit<=1)) {
+                                            ValidDigitsSeen &= ~digitsValidMask;
+                                        }
                                     }
                                 }
                             }
@@ -924,7 +926,7 @@ void __interrupt() MainInterruptHandler(void) {
                         }
 
                         // Always put the credit/BIP cache in the DisplayCache
-                        DisplayCache[4][currentDigit] = CachedBCD[4];
+                        //DisplayCache[4][currentDigit] = CachedBCD[4];
                     } else {
                         // If this is NOT a BASIC host, then we're going to 
                         // take the digits from the MPU without question and
@@ -982,9 +984,9 @@ int main(void) {
 
     uint32_t lastSecondRendered = 0xFFFFFFFF; // Force render on first pass
 
-    for (uint8_t displayCount=0; displayCount<4; displayCount++) {
+    for (uint8_t displayCount=0; displayCount<5; displayCount++) {
         for (uint8_t digitCount=0; digitCount<6; digitCount++) {
-            ScoreToBeEvaluated[displayCount][digitCount] = 0x0F;
+            if (displayCount<4) ScoreToBeEvaluated[displayCount][digitCount] = 0x0F;
             DisplayCache[displayCount][digitCount] = 0x0F;
         }
         StableCount[displayCount] = 0;
@@ -1083,7 +1085,7 @@ int main(void) {
                         // the operator menu until the MPU is reset
                         InOperatorMenu = 0x01;
                     } else {
-                        if (CapturedScoreStable==0x0F) {                            
+                        if ((CapturedScoreStable&0x0F)==0x0F) {                            
                             // We're only going to update the DisplayBuffer if all the score
                             // displays have settled
                             ScoreChanged = 0x00;
@@ -1202,7 +1204,7 @@ int main(void) {
                             }
                         }
 
-                        if (CapturedDisplayTestMode==0) {
+                        if (CapturedDisplayTestMode==0 && (CapturedScoreStable==0x1F)) {
                             // Update Credit/BIP with cached values
                             volatile uint8_t *cachePtr = &DisplayCache[4][0];
                             volatile uint8_t *displayPtr = &DisplayBuffer[4][0];
