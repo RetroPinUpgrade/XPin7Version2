@@ -444,7 +444,6 @@ void SendDigitBuffer() {
         currentDigitIndex = 6;
     }
 
-    DisplayOutputStage = 0;
 }
 
 
@@ -831,6 +830,10 @@ void __interrupt() MainInterruptHandler(void) {
 
                 // Check to see if the digit is valid
                 if (currentDigit!=0xFF) {
+                    // Gen-lock the output multiplexing to the MPU strobe
+                    SendDigitBuffer();
+                    DisplayOutputStage = 1;
+
                     uint8_t copyToDisplayBuffer = 1;
                     // We know which digit is being referenced
                     if (HostDetected==XPIN_BASIC_HOST_FOUND) {
@@ -942,11 +945,23 @@ void __interrupt() MainInterruptHandler(void) {
         }
     }
 
-    // 2. Timer2 Interrupt: Output Multiplexing (~450Hz) and Boot Clock
+    // 2. Timer2 Interrupt: System Clock and Fallback Multiplexing
     if (PIR1bits.TMR2IF) {
         PIR1bits.TMR2IF = 0; 
-        DisplayOutputStage = 1; 
-    }        
+
+        // Always maintain the system clock
+        DisplayOutputTickCount++;
+        if (DisplayOutputTickCount >= (XPIN_REFRESH_FREQUENCY/TICKS_PER_SECOND)) {
+            DisplayOutputTickCount = 0;
+            TicksSinceBoot++;
+        }
+
+        // ONLY multiplex via Timer2 if the MPU is missing or dead
+        if (HostDetected == XPIN_NO_HOST_FOUND) {
+            SendDigitBuffer();
+            DisplayOutputStage = 1; 
+        }
+    }
 }
 
 void ResetCurrentMPUScores() {
@@ -1026,13 +1041,7 @@ int main(void) {
         }
         
         if (DisplayOutputStage) {
-            SendDigitBuffer();
-            DisplayOutputTickCount++;
-            
-            if (DisplayOutputTickCount >= (XPIN_REFRESH_FREQUENCY/TICKS_PER_SECOND)) {
-                DisplayOutputTickCount = 0;
-                TicksSinceBoot++;
-            } 
+            DisplayOutputStage = 0;
 
             if (HostDetected == XPIN_NO_HOST_FOUND) {    
                 // Splash screen sequence (before the MPU boots)
@@ -1054,7 +1063,9 @@ int main(void) {
                     if (ballInPlay==1 && CurrentBIP!=1) pendingGameReset = 1;
                     CurrentBIP = ballInPlay;
                 } else {
-                    if (ballInPlay==0) {
+                    if (ballInPlay!=0xFF) {
+                        // Any non-blank BIP that didn't turn out to be 1-9 means
+                        // we're in attract mode
                         if (InAttractMode==0) {
                             // We're transitioning from game play mode to attract mode
                             // so we need to try to save the HighScoreToDate.
