@@ -10,19 +10,20 @@
 #pragma config IESO = OFF      // Internal/External Switchover (Disabled)
 #pragma config FCMEN = OFF     // Fail-Safe Clock Monitor (Disabled)
 #pragma config WRT = OFF       // Flash Memory Self-Write Protection (Disabled)
-#pragma config PLLEN = OFF     // PLL Enable (Disabled)
 #pragma config STVREN = ON     // Stack Overflow/Underflow Reset (Enabled)
 #pragma config BORV = LO       // Brown-out Reset Voltage Selection (Low)
 #pragma config LVP = OFF       // Low-Voltage Programming (Disabled for High Voltage ICSP)
+#pragma config PLLEN = ON      // Enable the 4x PLL
 
-#define _XTAL_FREQ 16000000
+#define _XTAL_FREQ 32000000    // Update delay macros for 32MHz
 
 #include <xc.h>
 #include <stdint.h>
 
 
 #define XPIN_SCORE_ROLL_CANDIDATE_LOWER_THRESHOLD       800000L
-#define XPIN_REFRESH_FREQUENCY                          450     // This value can be 100 to 1000 Hz
+#define XPIN_REFRESH_FREQUENCY                          400     // This value can be 100 to 1000 Hz
+#define XPIN_WATCHDOG_FREQUENCY                         150     // This value is used to ensure the MPU is still running
 #define TICKS_PER_SECOND                                15      // Used as an animation reference
 
 // Set this to 0 and the displays will boot blank
@@ -62,6 +63,7 @@ volatile uint8_t BlankingSignalsSeen = 0;
 volatile uint8_t LastStrobeSeen = 0;
 uint32_t HighScoreToDate = 0xFFFFFFFF; // This is the working high score
 uint32_t NewHighestScore = 0;
+uint32_t NativeMPUHSTD = 0xFFFFFFFF;
 
 uint8_t ShowingHighScore = 0;
 uint8_t InAttractMode = 1;
@@ -85,11 +87,15 @@ volatile uint8_t ScanCompleteFlag = 0;
 volatile uint8_t CapturedValidDigits = 0;
 volatile uint8_t CapturedScoreStable = 0;
 volatile uint8_t CapturedDisplayTestMode = 0;
+volatile uint8_t GreenLedState = 1; // 1 = OFF (Active Low)
+volatile uint8_t RedLedState = 1;   // 1 = OFF
+volatile uint8_t InServiceMenu = 0;
 
 
 // EEPROM Starting Addresses
-#define EEPROM_SIG_ADDR  0x00
-#define EEPROM_HSTD_ADDR 0x04
+#define EEPROM_SIG_ADDR         0x00
+#define EEPROM_HSTD_ADDR        0x04
+#define EEPROM_NATIVE_HSTD      0x08 // 4 bytes for the MPU's native HSTD
 
 // Global RAM mirror for fast access during gameplay
 uint32_t HSTDMemory; // This is the high score currently in eeprom
@@ -114,12 +120,14 @@ void InitializePersistentMemory() {
             eeprom_write(EEPROM_SIG_ADDR + i, expectedSignature[i]);
         }
 
-        // Write 0xFFFFFFFF to the 4-byte HSTDMemory location
+        // Write 0xFFFFFFFF to the 4-byte HSTDMemory and NativeMPUHSTD locations
         for (uint8_t i = 0; i < 4; i++) {
             eeprom_write(EEPROM_HSTD_ADDR + i, 0xFF);
+            eeprom_write(EEPROM_NATIVE_HSTD + i, 0xFF);
         }
         
         HSTDMemory = 0xFFFFFFFF;
+        NativeMPUHSTD = 0xFFFFFFFF;
         
     } else {
         
@@ -131,30 +139,60 @@ void InitializePersistentMemory() {
         tempMemory |= ((uint32_t)eeprom_read(EEPROM_HSTD_ADDR + 0));
         
         HSTDMemory = tempMemory;
+
+        // Assemble NativeMPUHSTD from the 4 EEPROM bytes (Little Endian)
+        uint32_t tempNative = 0;
+        tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 3) << 24);
+        tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 2) << 16);
+        tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 1) << 8);
+        tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 0));
+        
+        NativeMPUHSTD = tempNative;
     }
 }
 
 
-void CommitHSTDMemory(unsigned long currentHighScore) {
-    // Check to see if it has changed. If not, no need to write to eeprom
-    if (currentHighScore==HSTDMemory) return;
-    HSTDMemory = currentHighScore;
 
-    uint8_t newBytes[4];
+
+void CommitHSTDMemory(uint32_t currentHighScore, uint32_t currentNativeHSTD) {
     
-    // Break the 32-bit variable into 4 bytes (Little Endian to match init)
-    newBytes[0] = (uint8_t)(HSTDMemory & 0xFF);
-    newBytes[1] = (uint8_t)((HSTDMemory >> 8) & 0xFF);
-    newBytes[2] = (uint8_t)((HSTDMemory >> 16) & 0xFF);
-    newBytes[3] = (uint8_t)((HSTDMemory >> 24) & 0xFF);
+    // Evaluate and write HSTDMemory
+    if (currentHighScore != HSTDMemory) {
+        HSTDMemory = currentHighScore;
+        uint8_t newBytes[4];
+        
+        newBytes[0] = (uint8_t)(HSTDMemory & 0xFF);
+        newBytes[1] = (uint8_t)((HSTDMemory >> 8) & 0xFF);
+        newBytes[2] = (uint8_t)((HSTDMemory >> 16) & 0xFF);
+        newBytes[3] = (uint8_t)((HSTDMemory >> 24) & 0xFF);
 
-    // Compare and update only the bytes that differ
-    for (uint8_t i = 0; i < 4; i++) {
-        if (eeprom_read(EEPROM_HSTD_ADDR + i) != newBytes[i]) {
-            eeprom_write(EEPROM_HSTD_ADDR + i, newBytes[i]);
+        for (uint8_t i = 0; i < 4; i++) {
+            if (eeprom_read(EEPROM_HSTD_ADDR + i) != newBytes[i]) {
+                eeprom_write(EEPROM_HSTD_ADDR + i, newBytes[i]);
+            }
+        }
+    }
+
+    // Evaluate and write NativeMPUHSTD
+    if (currentNativeHSTD != NativeMPUHSTD) {
+        NativeMPUHSTD = currentNativeHSTD;
+        uint8_t nativeBytes[4];
+        
+        nativeBytes[0] = (uint8_t)(NativeMPUHSTD & 0xFF);
+        nativeBytes[1] = (uint8_t)((NativeMPUHSTD >> 8) & 0xFF);
+        nativeBytes[2] = (uint8_t)((NativeMPUHSTD >> 16) & 0xFF);
+        nativeBytes[3] = (uint8_t)((NativeMPUHSTD >> 24) & 0xFF);
+
+        for (uint8_t i = 0; i < 4; i++) {
+            if (eeprom_read(EEPROM_NATIVE_HSTD + i) != nativeBytes[i]) {
+                eeprom_write(EEPROM_NATIVE_HSTD + i, nativeBytes[i]);
+            }
         }
     }
 }
+
+
+
 
 
 void ShowScoreInAllDisplays(uint32_t scoreToShow) {
@@ -196,7 +234,7 @@ void ShowScoreInAllDisplays(uint32_t scoreToShow) {
     // Tens (Index 1)
     digit = 0;
     while (temp >= 10ul) { temp -= 10ul; digit++; }
-    if (digit == 0 && leadingZero) tempBCD[1] = 0x0F;
+    if (digit == 0 && leadingZero && temp) tempBCD[1] = 0x0F;
     else { tempBCD[1] = digit; leadingZero = 0; }
 
     // Ones (Index 0) - Never blanked, always show at least '0'
@@ -218,8 +256,8 @@ void InitializeHardware(void) {
         }
     }
 
-    // Configure internal oscillator to 16 MHz
-    OSCCON = 0x78;
+    // Configure internal oscillator to 8 MHz with 4x PLL enabled (32 MHz total)
+    OSCCON = 0xF0;
 
     // PORTC (RC0-RC3) as digital inputs for incoming BCD data
     TRISC |= 0x0F; 
@@ -227,9 +265,9 @@ void InitializeHardware(void) {
     // PORTB (RB0-RB5) as digital inputs for incoming Blanking & Display Latches
     TRISB |= 0x3F; 
 
-    // PORTD (RD1-RD6) as digital inputs for incoming Digit Enables
-    TRISD |= 0x7E; 
-    
+    // PORTD (RD0-RD6) as digital inputs (RD0 is Button)
+    TRISD |= 0x7F;
+
     // PORTD (RD7) as digital output for Blanking OUT
     TRISDbits.TRISD7 = 0;
     LATDbits.LATD7 = 0;
@@ -266,27 +304,31 @@ void InitializeHardware(void) {
 // Purpose: Set up Timer2 at given frequency to output data to the displays
 // 
 // ==============================================================================
-uint32_t InitializeDisplayTimer(uint16_t frequency) {
+uint32_t InitializeDisplayTimer(uint16_t frequency, uint8_t enableInterrupts) {
     // Constrain input to the requested 100Hz - 1000Hz range
     if (frequency < 100) frequency = 100;
     if (frequency > 1000) frequency = 1000;
 
-    // F_CY = 4,000,000 Hz. 
+    // F_CY = 8,000,000 Hz at 32MHz clock
     // Using Prescaler 1:64 and Postscaler 1:4 (Total divider = 256)
-    // 4,000,000 / 256 = 15625
-    // PR2 = (15625 / frequency) - 1. We subtract 0.5f to properly round the float.
-    PR2 = (uint8_t)((15625.0f / frequency) - 0.5f);
+    // 8,000,000 / 256 = 31250 Hz timer clock
+    
+    // Calculate PR2 with integer rounding: (numerator + (denominator / 2)) / denominator
+    PR2 = (uint8_t)(((31250UL + (frequency / 2)) / frequency) - 1);
+    
+    // Reset timer value to prevent a rollover stall if the new PR2 
+    // is lower than the current TMR2 count
+    TMR2 = 0;
     
     // T2OUTPS = 0011 (1:4), TMR2ON = 1, T2CKPS = 11 (1:64)
     T2CON = 0x1F; 
     
-    // Enable Timer2 Interrupts
-    PIE1bits.TMR2IE = 1;
+    // Enable/disable Timer2 Interrupts
+    PIE1bits.TMR2IE = enableInterrupts;
 
-    // Return the actual achieved period in milliseconds
-    // Period (ms) = (Prescaler * Postscaler * (PR2 + 1)) / (F_OSC / 4000)
-    // Period (ms) = (256.0 * (PR2 + 1)) / 4000.0 = (PR2 + 1) * 0.064
-    return (uint32_t)((float)(PR2 + 1) * 0.064f);
+    // Return the actual achieved period in milliseconds using integer math
+    // Equivalent to the previous float math: (PR2 + 1) * 0.032
+    return (((uint32_t)(PR2 + 1) * 32) / 1000);
 }
 
 // ==============================================================================
@@ -394,6 +436,10 @@ void SendDigitBuffer() {
      
     // Start at index 6 (Millions) for left-to-right multiplexing sweep
     static uint8_t currentDigitIndex = 6;
+
+    // Safely inject the active-low LED states into the shadow register
+    if (GreenLedState == 0) PortE_Master &= ~0x80; else PortE_Master |= 0x80;
+    if (RedLedState == 0) PortE_Master &= ~0x40; else PortE_Master |= 0x40;
 
     // Calculate the new Digit Enable lines
     PortE_Master = (PortE_Master & 0xF8) | (7 - currentDigitIndex);
@@ -721,11 +767,11 @@ uint8_t FirstBit(uint8_t byteToBeCounted) {
 
 
 void __interrupt() MainInterruptHandler(void) {
+    uint8_t valueOfPortC = PORTC;
     
     // 1. Display Latches and Blanking handler
     if (INTCONbits.IOCIF) {
         uint8_t valueOfPortD = PORTD;
-        uint8_t valueOfPortC = PORTC;
         uint8_t valueOfIOCBF = IOCBF;
 
         // Direct dual-LUT flag isolation and mapping
@@ -800,6 +846,13 @@ void __interrupt() MainInterruptHandler(void) {
             
                 // Increase threshold to 14 to capture two full 7-digit cycles
                 if (HostDetectionConfidence > 14) {
+                    // Turn OFF Timer2 interrupts to protect IOC reads
+                    // and set Timer2 to a lower frequency for test animations
+                    // and watchdog
+                    InitializeDisplayTimer(XPIN_WATCHDOG_FREQUENCY, 0);
+                    GreenLedState = 0;
+                    RedLedState = 1;
+
                     HostDetected = HostCandidate;
 
                     // We can clear any boot digits
@@ -810,6 +863,10 @@ void __interrupt() MainInterruptHandler(void) {
                     }
                 }
             } else if (HostDetected) {
+                // Gen-lock the output multiplexing to the MPU strobe
+                SendDigitBuffer();
+                DisplayOutputStage = 1;
+
                 // The host has been found, so we can post the 
                 // value to the output buffer or cache it for evaluation
                 uint8_t currentDigit = 0xFF;
@@ -830,9 +887,6 @@ void __interrupt() MainInterruptHandler(void) {
 
                 // Check to see if the digit is valid
                 if (currentDigit!=0xFF) {
-                    // Gen-lock the output multiplexing to the MPU strobe
-                    SendDigitBuffer();
-                    DisplayOutputStage = 1;
 
                     uint8_t copyToDisplayBuffer = 1;
                     // We know which digit is being referenced
@@ -945,23 +999,27 @@ void __interrupt() MainInterruptHandler(void) {
         }
     }
 
-    // 2. Timer2 Interrupt: System Clock and Fallback Multiplexing
-    if (PIR1bits.TMR2IF) {
+
+    // 2. Timer2 Interrupt: Fallback Multiplexing & Clock
+    // Only processed here if the interrupt is explicitly enabled (Host Dead)
+    if (PIR1bits.TMR2IF && PIE1bits.TMR2IE) {
         PIR1bits.TMR2IF = 0; 
 
-        // Always maintain the system clock
         DisplayOutputTickCount++;
         if (DisplayOutputTickCount >= (XPIN_REFRESH_FREQUENCY/TICKS_PER_SECOND)) {
             DisplayOutputTickCount = 0;
             TicksSinceBoot++;
+
+            if (InServiceMenu == 0) {
+                if (TicksSinceBoot&0x01) GreenLedState ^= 1; 
+                RedLedState = 1; 
+            }            
         }
 
-        // ONLY multiplex via Timer2 if the MPU is missing or dead
-        if (HostDetected == XPIN_NO_HOST_FOUND) {
-            SendDigitBuffer();
-            DisplayOutputStage = 1; 
-        }
+        SendDigitBuffer();
+        DisplayOutputStage = 1; 
     }
+
 }
 
 void ResetCurrentMPUScores() {
@@ -970,6 +1028,69 @@ void ResetCurrentMPUScores() {
         CurrentRollDigits[count] = 0;
     }
 }
+
+uint8_t OriginalHostState = XPIN_NO_HOST_FOUND;
+void HandleServiceMenuButton() {
+    // Correct active-low physical evaluation
+    uint8_t buttonPressed = (PORTDbits.RD0 == 0) ? 1 : 0; 
+    static uint8_t lastButtonState = 0;
+    static uint32_t buttonPressStartTicks = 0;
+
+    if (buttonPressed && !lastButtonState) {
+        // Falling edge
+        buttonPressStartTicks = TicksSinceBoot;
+        
+        if (!InServiceMenu) {
+            // Enter the service menu
+            InServiceMenu = 1;
+            GreenLedState = 1;
+            RedLedState = 0;
+            OriginalHostState = HostDetected;
+            HostDetected = XPIN_NATIVE7_HOST_FOUND; 
+            for (uint8_t displayCount=0; displayCount<5; displayCount++) {
+                for (uint8_t digitCount=0; digitCount<7; digitCount++) {
+                    DisplayBuffer[displayCount][digitCount] = 0x0F;
+                }
+            }            
+        }
+    } else if (!buttonPressed && lastButtonState) {
+        // Rising edge
+        if (InServiceMenu == 1) {
+            // Ignore the release of the initial press
+            InServiceMenu = 2;
+        } else if (InServiceMenu == 2) {
+            // Evaluate long vs short press
+            if ((buttonPressStartTicks + TICKS_PER_SECOND) < TicksSinceBoot) {
+                // Long press (> 1s): Clear HSTD
+                HighScoreToDate = 0xFFFFFFFF;
+                NewHighestScore = 0xFFFFFFFF;
+                CommitHSTDMemory(0xFFFFFFFF, 0xFFFFFFFF); // Force EEPROM commit immediately
+                
+                // Ensure Red LED goes back to solid ON after flashing
+                RedLedState = 0;
+                GreenLedState = 1;
+            } else {
+                // Short press (< 1s): Exit menu
+                HostDetected = OriginalHostState;
+                RedLedState = 1;
+                GreenLedState = 0;
+                InServiceMenu = 0;
+            }
+        }
+    } else if (buttonPressed && lastButtonState) {
+        // Holding
+        if (InServiceMenu == 2) {
+            // Flash the red LED while holding
+            RedLedState = TicksSinceBoot & 0x01;
+            if ((buttonPressStartTicks + TICKS_PER_SECOND) < TicksSinceBoot) {
+                GreenLedState = (TicksSinceBoot & 0x01) ? 0 : 1;
+            }
+        }
+    }
+
+    lastButtonState = buttonPressed;
+}
+
 
 void ResetHostVariables() {
     DisplayOutputTickCount = 0;
@@ -985,14 +1106,22 @@ void ResetHostVariables() {
     HostCandidate = XPIN_NO_HOST_FOUND;
     InOperatorMenu = 0x00;
     DisplayTestStartTime = 0;
+
+    // Enable hardware interrupts for jitter-free fallback multiplexing    
+    InitializeDisplayTimer(XPIN_REFRESH_FREQUENCY, 1); 
 }
 
 
 int main(void) {
     InitializePersistentMemory();
     InitializeHardware();
-    InitializeDisplayTimer(XPIN_REFRESH_FREQUENCY);
+
+    // Turn on the timer with a fast frequency
+    // to update displays and enable interrupts
+    InitializeDisplayTimer(XPIN_REFRESH_FREQUENCY, 1); 
+    
     HighScoreToDate = HSTDMemory;
+    NewHighestScore = HighScoreToDate;
 
     ResetCurrentMPUScores();
     CurrentBIP = 0;
@@ -1028,10 +1157,21 @@ int main(void) {
     }
 */   
 
-    uint8_t pendingGameReset = 0;
     ResetHostVariables();
     
     while(1) {
+        // Polled Clock: Only maintain TicksSinceBoot here if the ISR isn't doing it
+        if (PIR1bits.TMR2IF && !PIE1bits.TMR2IE) {
+            PIR1bits.TMR2IF = 0; 
+
+            DisplayOutputTickCount++;
+            if (DisplayOutputTickCount >= (XPIN_WATCHDOG_FREQUENCY/TICKS_PER_SECOND)) {
+                DisplayOutputTickCount = 0;
+                TicksSinceBoot++;
+
+                HandleServiceMenuButton();
+            }
+        }
 
         if (HostDetected && TicksSinceBoot>(LastBlankingSeen+2)) {
             // We haven't seen a BLANKING signal in more
@@ -1060,17 +1200,26 @@ int main(void) {
                     // if we're showing ball in play to be a single-digit, non-zero number
                     // we're most likely in attract mode
                     InAttractMode = 0;
-                    if (ballInPlay==1 && CurrentBIP!=1) pendingGameReset = 1;
+                    if (ballInPlay==1 && CurrentBIP!=1) {
+                        // Rage-Quit / Start Button Slam Intercept
+                        // Instantly clear out the cached scores and rollover tracking
+                        // so the drop to 00 doesn't trigger a phantom million
+                        ResetCurrentMPUScores();
+                    }
                     CurrentBIP = ballInPlay;
                 } else {
                     if (ballInPlay!=0xFF) {
                         // Any non-blank BIP that didn't turn out to be 1-9 means
                         // we're in attract mode
                         if (InAttractMode==0) {
+                            // Promote the shadow variable to the active HSTD
+                            if (NewHighestScore > HighScoreToDate) {
+                                HighScoreToDate = NewHighestScore;
+                            }                            
                             // We're transitioning from game play mode to attract mode
                             // so we need to try to save the HighScoreToDate.
                             // If it's not changed, then the function will reject the save.
-                            CommitHSTDMemory(HighScoreToDate);
+                            CommitHSTDMemory(HighScoreToDate, NativeMPUHSTD);
                         }
                         InAttractMode = 1;
                     }
@@ -1150,6 +1299,7 @@ int main(void) {
                                         if (scoreIndex && (newMPUScores[scoreIndex-1]!=newMPUScores[scoreIndex])) {
                                             ShowingHighScore = 0;
                                         }
+                                        if (newMPUScores[0] == 0) ShowingHighScore = 0;
                                     }
                                 } else {
                                     digitsValidMask = 0x01;
@@ -1161,11 +1311,16 @@ int main(void) {
                                 }
 
                                 if (ShowingHighScore) {
+                                    // SPY: Memorize exactly what the MPU thinks the HSTD is. 
+                                    // This naturally updates during Attract Mode and Game Over.
+                                    NativeMPUHSTD = newMPUScores[0];
+
                                     // We're going to put the HSTD in all high scores
                                     if (HighScoreToDate==0xFFFFFFFF) {
                                         // If the HighScoreToDate is uninitialized, we can initialize it now
                                         HighScoreToDate = newMPUScores[0];
-                                        CommitHSTDMemory(HighScoreToDate);
+                                        NewHighestScore = HighScoreToDate;
+                                        CommitHSTDMemory(HighScoreToDate, NativeMPUHSTD);
                                     }
                                     ShowScoreInAllDisplays(HighScoreToDate);
                                 } else {
@@ -1177,13 +1332,18 @@ int main(void) {
                                             if (ScoreChanged & scoreBitmask) {
                                                 if (CurrentMPUScores[displayCount]>XPIN_SCORE_ROLL_CANDIDATE_LOWER_THRESHOLD) {
                                                     if (newMPUScores[displayCount]<CurrentMPUScores[displayCount]) {
-                                                        CurrentRollDigits[displayCount] += 1;
-                                                        if (CurrentRollDigits[displayCount]>9) CurrentRollDigits[displayCount] = 0;
+
+                                                        // HSTD Flash Protection: Compare against the spied MPU broadcast
+                                                        // (only applies to MPU200 games, really)
+                                                        if (newMPUScores[displayCount] != NativeMPUHSTD) {                                                        
+                                                            CurrentRollDigits[displayCount] += 1;
+                                                            if (CurrentRollDigits[displayCount]>9) CurrentRollDigits[displayCount] = 0;
+                                                        }
                                                     }
                                                 }                                    
                                                 uint32_t sevenDigitScore = newMPUScores[displayCount] + BCDValueLUT[60+CurrentRollDigits[displayCount]];
-                                                if (sevenDigitScore>HighScoreToDate) {
-                                                    HighScoreToDate = sevenDigitScore;
+                                                if (sevenDigitScore>NewHighestScore) {
+                                                    NewHighestScore = sevenDigitScore;
                                                 }
                                             }
                                             CurrentMPUScores[displayCount] = newMPUScores[displayCount];
@@ -1224,10 +1384,10 @@ int main(void) {
                             *displayPtr++ = *cachePtr++;
                             *displayPtr++ = *cachePtr++;
                             *displayPtr++ = *cachePtr++;
-                            //*displayPtr++ = *cachePtr++;
+                            *displayPtr++ = *cachePtr++;
 
                             // This is a debug thing
-                            *displayPtr = (uint8_t)(((InOperatorMenu)?1:0) | ((ShowingHighScore)?2:0) | ((ScanCompleteFlag) ? 0x04 : 0x00));
+                            //*displayPtr = (uint8_t)(((InOperatorMenu)?1:0) | ((ShowingHighScore)?2:0) | ((ScanCompleteFlag) ? 0x04 : 0x00));
                         }
                     }
 
