@@ -30,6 +30,7 @@
 // and set it to 1 to boot to a 7s animation
 #define XPIN_SHOW_SPLASH_SCREEN         1
 
+
 #define XPIN_NO_HOST_FOUND              0
 #define XPIN_BASIC_HOST_FOUND           1
 #define XPIN_SMART_HOST_FOUND           2
@@ -90,6 +91,7 @@ volatile uint8_t CapturedDisplayTestMode = 0;
 volatile uint8_t GreenLedState = 1; // 1 = OFF (Active Low)
 volatile uint8_t RedLedState = 1;   // 1 = OFF
 volatile uint8_t InServiceMenu = 0;
+volatile uint8_t ServiceMenuDisplayTest = 0;
 
 
 // EEPROM Starting Addresses
@@ -1044,6 +1046,7 @@ void HandleServiceMenuButton() {
             // Enter the service menu
             InServiceMenu = 1;
             GreenLedState = 1;
+            ServiceMenuDisplayTest = 0;
             RedLedState = 0;
             OriginalHostState = HostDetected;
             HostDetected = XPIN_NATIVE7_HOST_FOUND; 
@@ -1070,12 +1073,20 @@ void HandleServiceMenuButton() {
                 RedLedState = 0;
                 GreenLedState = 1;
             } else {
-                // Short press (< 1s): Exit menu
+                // Short press (< 1s): Go to display test
                 HostDetected = OriginalHostState;
-                RedLedState = 1;
-                GreenLedState = 0;
-                InServiceMenu = 0;
+                RedLedState = 0;
+                GreenLedState = 1;
+                InServiceMenu = 3;
+                ServiceMenuDisplayTest = 1;
+                DisplayTestStartTime = 0;
             }
+        } else if (InServiceMenu==3) {
+            HostDetected = OriginalHostState;
+            RedLedState = 1;
+            GreenLedState = 0;
+            InServiceMenu = 0;
+            ServiceMenuDisplayTest = 0;
         }
     } else if (buttonPressed && lastButtonState) {
         // Holding
@@ -1228,12 +1239,12 @@ int main(void) {
 
                 if (ScanCompleteFlag) {
                     ScanCompleteFlag = 0;
-                    if (CapturedDisplayTestMode) {
+                    if (CapturedDisplayTestMode || ServiceMenuDisplayTest) {
                         if (DisplayTestStartTime==0) {
                             DisplayTestStartTime = TicksSinceBoot;
                             DisplayTestPhase = 0xFF;
                         }
-                        if (CapturedDisplayTestMode==0x02) SawBothTestTypes = 0x01;
+                        if (CapturedDisplayTestMode==0x02 || ServiceMenuDisplayTest) SawBothTestTypes = 0x01;
                         // We're going to show the test animation
                         // This will be based on how long it has been since the display test mode
                         // started, and what type of display test we're supposed to show (just 1111111, etc., 
@@ -1243,7 +1254,7 @@ int main(void) {
                         // Because we saw a test pattern on the digits,
                         // se're going to consider the MPU to be in
                         // the operator menu until the MPU is reset
-                        InOperatorMenu = 0x01;
+                        if (ServiceMenuDisplayTest==0) InOperatorMenu = 0x01;
                     } else {
                         if ((CapturedScoreStable&0x0F)==0x0F) {                            
                             // We're only going to update the DisplayBuffer if all the score
