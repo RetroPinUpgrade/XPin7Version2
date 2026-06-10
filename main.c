@@ -36,12 +36,6 @@
 #define XPIN_SMART_HOST_FOUND           2
 #define XPIN_NATIVE7_HOST_FOUND         3
 
-
-
-// LED Pin Definitions
-//#define RED_LED   LATEbits.LATE6
-//#define GREEN_LED LATEbits.LATE7
-
 // Global variables (volatile because they are modified in interrupts)
 volatile uint8_t CachedBCD[5] = {0x0F, 0x0F, 0x0F, 0x0F, 0x0F};
 volatile uint8_t DisplayBuffer[5][7];
@@ -1165,22 +1159,6 @@ int main(void) {
     ScoreStable = 0x00;
     CapturedScoreStable = 0x00;
     CapturedValidDigits = 0x00;
-
-    /*
-    // Red LED Logic (Top of the second, ~50ms pulse)
-    if (bootTickCount == 0) {
-        PortE_Master &= ~0x40; // Turn ON (Clear bit 6)
-    } else if (bootTickCount == 23) {
-        PortE_Master |= 0x40;  // Turn OFF (Set bit 6)
-    }
-
-    // Green LED Logic (Bottom of the second, ~50ms pulse)
-    if (bootTickCount == 225) {
-        PortE_Master &= ~0x80; // Turn ON (Clear bit 7)
-    } else if (bootTickCount == 248) {
-        PortE_Master |= 0x80;  // Turn OFF (Set bit 7)
-    }
-*/   
 
     ResetHostVariables();
     
