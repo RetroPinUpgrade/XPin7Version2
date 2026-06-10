@@ -62,9 +62,13 @@ volatile uint8_t HostDetectionConfidence = 0;
 volatile uint8_t HostCandidate = 0;
 volatile uint8_t BlankingSignalsSeen = 0;
 volatile uint8_t LastStrobeSeen = 0;
+
+
 uint32_t HighScoreToDate = 0xFFFFFFFF; // This is the working high score
+uint32_t HSTDMemory;   // This is the high score currently in eeprom
 uint32_t NewHighestScore = 0;
 uint32_t NativeMPUHSTD = 0xFFFFFFFF;
+uint32_t NativeMPUHSTDMemory;  // This is the native MPU HSTD in memory
 
 uint8_t ShowingHighScore = 0;
 uint8_t InAttractMode = 1;
@@ -99,25 +103,26 @@ volatile uint8_t ServiceMenuDisplayTest = 0;
 #define EEPROM_HSTD_ADDR        0x04
 #define EEPROM_NATIVE_HSTD      0x08 // 4 bytes for the MPU's native HSTD
 
-// Global RAM mirror for fast access during gameplay
-uint32_t HSTDMemory; // This is the high score currently in eeprom
 
 void InitializePersistentMemory() {
     uint8_t expectedSignature[4] = {0x37, 0x79, 0x6F, 0x6C};
     uint8_t needsInitialization = 0;
 
     // Check if the 4-byte signature matches
+    INTCONbits.GIE = 0;
     for (uint8_t i = 0; i < 4; i++) {
         if (eeprom_read(EEPROM_SIG_ADDR + i) != expectedSignature[i]) {
             needsInitialization = 1;
             break;
         }
     }
+    INTCONbits.GIE = 1;
 
     // If signature is missing or corrupt, format the EEPROM
     if (needsInitialization) {
         
         // Write the signature
+        INTCONbits.GIE = 0;
         for (uint8_t i = 0; i < 4; i++) {
             eeprom_write(EEPROM_SIG_ADDR + i, expectedSignature[i]);
         }
@@ -127,7 +132,8 @@ void InitializePersistentMemory() {
             eeprom_write(EEPROM_HSTD_ADDR + i, 0xFF);
             eeprom_write(EEPROM_NATIVE_HSTD + i, 0xFF);
         }
-        
+        INTCONbits.GIE = 1;
+
         HSTDMemory = 0xFFFFFFFF;
         NativeMPUHSTD = 0xFFFFFFFF;
         
@@ -135,6 +141,7 @@ void InitializePersistentMemory() {
         
         // Assemble the 32-bit value from the 4 EEPROM bytes (Little Endian)
         uint32_t tempMemory = 0;
+        INTCONbits.GIE = 0;
         tempMemory |= ((uint32_t)eeprom_read(EEPROM_HSTD_ADDR + 3) << 24);
         tempMemory |= ((uint32_t)eeprom_read(EEPROM_HSTD_ADDR + 2) << 16);
         tempMemory |= ((uint32_t)eeprom_read(EEPROM_HSTD_ADDR + 1) << 8);
@@ -148,8 +155,8 @@ void InitializePersistentMemory() {
         tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 2) << 16);
         tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 1) << 8);
         tempNative |= ((uint32_t)eeprom_read(EEPROM_NATIVE_HSTD + 0));
-        
-        NativeMPUHSTD = tempNative;
+        INTCONbits.GIE = 1;
+        NativeMPUHSTDMemory = tempNative;
     }
 }
 
@@ -168,28 +175,32 @@ void CommitHSTDMemory(uint32_t currentHighScore, uint32_t currentNativeHSTD) {
         newBytes[2] = (uint8_t)((HSTDMemory >> 16) & 0xFF);
         newBytes[3] = (uint8_t)((HSTDMemory >> 24) & 0xFF);
 
+        INTCONbits.GIE = 0;
         for (uint8_t i = 0; i < 4; i++) {
             if (eeprom_read(EEPROM_HSTD_ADDR + i) != newBytes[i]) {
                 eeprom_write(EEPROM_HSTD_ADDR + i, newBytes[i]);
             }
         }
+        INTCONbits.GIE = 1;
     }
 
     // Evaluate and write NativeMPUHSTD
-    if (currentNativeHSTD != NativeMPUHSTD) {
-        NativeMPUHSTD = currentNativeHSTD;
+    if (currentNativeHSTD != NativeMPUHSTDMemory) {
+        NativeMPUHSTDMemory = currentNativeHSTD;
         uint8_t nativeBytes[4];
         
-        nativeBytes[0] = (uint8_t)(NativeMPUHSTD & 0xFF);
-        nativeBytes[1] = (uint8_t)((NativeMPUHSTD >> 8) & 0xFF);
-        nativeBytes[2] = (uint8_t)((NativeMPUHSTD >> 16) & 0xFF);
-        nativeBytes[3] = (uint8_t)((NativeMPUHSTD >> 24) & 0xFF);
+        nativeBytes[0] = (uint8_t)(NativeMPUHSTDMemory & 0xFF);
+        nativeBytes[1] = (uint8_t)((NativeMPUHSTDMemory >> 8) & 0xFF);
+        nativeBytes[2] = (uint8_t)((NativeMPUHSTDMemory >> 16) & 0xFF);
+        nativeBytes[3] = (uint8_t)((NativeMPUHSTDMemory >> 24) & 0xFF);
 
+        INTCONbits.GIE = 0;
         for (uint8_t i = 0; i < 4; i++) {
             if (eeprom_read(EEPROM_NATIVE_HSTD + i) != nativeBytes[i]) {
                 eeprom_write(EEPROM_NATIVE_HSTD + i, nativeBytes[i]);
             }
         }
+        INTCONbits.GIE = 1;
     }
 }
 
@@ -1068,7 +1079,7 @@ void HandleServiceMenuButton() {
             if ((buttonPressStartTicks + TICKS_PER_SECOND) < TicksSinceBoot) {
                 // Long press (> 1s): Clear HSTD
                 HighScoreToDate = 0xFFFFFFFF;
-                NewHighestScore = 0xFFFFFFFF;
+                NewHighestScore = 0;
                 CommitHSTDMemory(0xFFFFFFFF, 0xFFFFFFFF); // Force EEPROM commit immediately
                 
                 // Ensure Red LED goes back to solid ON after flashing
@@ -1135,6 +1146,7 @@ int main(void) {
     
     HighScoreToDate = HSTDMemory;
     NewHighestScore = HighScoreToDate;
+    NativeMPUHSTD = NativeMPUHSTDMemory;
 
     ResetCurrentMPUScores();
     CurrentBIP = 0;
@@ -1265,7 +1277,7 @@ int main(void) {
                         // the operator menu until the MPU is reset
                         InOperatorMenu = 0x01;
                     } else {
-                        if ((CapturedScoreStable&0x0F)==0x0F) {                            
+                        if ((CapturedScoreStable&0x0F)==0x0F) {
                             // We're only going to update the DisplayBuffer if all the score
                             // displays have settled
                             ScoreChanged = 0x00;
@@ -1291,6 +1303,7 @@ int main(void) {
                                     displayPtr += 7;
                                 } else {
                                     // Any invalid score gets copied directly to the display
+                                    // This is akin to a "transparent" mode for Basic Hosts
                                     *displayPtr++ = *cachePtr++;
                                     *displayPtr++ = *cachePtr++;
                                     *displayPtr++ = *cachePtr++;
@@ -1319,7 +1332,13 @@ int main(void) {
                                         if (scoreIndex && (newMPUScores[scoreIndex-1]!=newMPUScores[scoreIndex])) {
                                             ShowingHighScore = 0;
                                         }
-                                        if (newMPUScores[0] == 0) ShowingHighScore = 0;
+                                        
+                                        // A blanked high score will trip things up
+                                        // there are rare circumstances when the displays will 
+                                        // be all 00 (like booting an early Bally), but if we
+                                        // don't treat all 00 as a high score then we'll trip the 
+                                        // rollover on MPU200 games
+                                        //if (newMPUScores[0] == 0) ShowingHighScore = 0;
                                     }
                                 } else {
                                     digitsValidMask = 0x01;
@@ -1331,6 +1350,7 @@ int main(void) {
                                 }
 
                                 if (ShowingHighScore) {
+                                    RedLedState ^= 1;
                                     // SPY: Memorize exactly what the MPU thinks the HSTD is. 
                                     // This naturally updates during Attract Mode and Game Over.
                                     NativeMPUHSTD = newMPUScores[0];
@@ -1340,30 +1360,36 @@ int main(void) {
                                         // If the HighScoreToDate is uninitialized, we can initialize it now
                                         HighScoreToDate = newMPUScores[0];
                                         NewHighestScore = HighScoreToDate;
+                                        // Save HSTD and NativeMPUSTD in case they've changed
                                         CommitHSTDMemory(HighScoreToDate, NativeMPUHSTD);
                                     }
                                     ShowScoreInAllDisplays(HighScoreToDate);
                                 } else {
+                                    RedLedState = 1;
                                     // We're going to evaluate scores for rollover and post changed scores 
                                     // to the DisplayBuffer
                                     uint8_t scoreBitmask = 0x01;
                                     for (uint8_t displayCount=0; displayCount<4; displayCount++) {
                                         if (ScoreReadyForEvaluation & scoreBitmask) {
-                                            if (ScoreChanged & scoreBitmask) {
+                                            // If we're not in attract mode and the score has changed
+                                            // we can check it for a roll
+                                            if (InAttractMode==0 && (ScoreChanged & scoreBitmask)) {
                                                 if (CurrentMPUScores[displayCount]>XPIN_SCORE_ROLL_CANDIDATE_LOWER_THRESHOLD) {
                                                     if (newMPUScores[displayCount]<CurrentMPUScores[displayCount]) {
 
                                                         // HSTD Flash Protection: Compare against the spied MPU broadcast
                                                         // (only applies to MPU200 games, really)
-                                                        if (newMPUScores[displayCount] != NativeMPUHSTD) {                                                        
+                                                        if ( (CurrentMPUScores[displayCount] != NativeMPUHSTD) && (newMPUScores[displayCount] != NativeMPUHSTD) ) {
                                                             CurrentRollDigits[displayCount] += 1;
                                                             if (CurrentRollDigits[displayCount]>9) CurrentRollDigits[displayCount] = 0;
                                                         }
                                                     }
-                                                }                                    
-                                                uint32_t sevenDigitScore = newMPUScores[displayCount] + BCDValueLUT[60+CurrentRollDigits[displayCount]];
-                                                if (sevenDigitScore>NewHighestScore) {
-                                                    NewHighestScore = sevenDigitScore;
+                                                }   
+                                                if (newMPUScores[displayCount]!=NativeMPUHSTD) {
+                                                    uint32_t sevenDigitScore = newMPUScores[displayCount] + BCDValueLUT[60+CurrentRollDigits[displayCount]];
+                                                    if (sevenDigitScore>NewHighestScore) {
+                                                        NewHighestScore = sevenDigitScore;
+                                                    }
                                                 }
                                             }
                                             CurrentMPUScores[displayCount] = newMPUScores[displayCount];
@@ -1392,6 +1418,8 @@ int main(void) {
                                     }                                    
                                 }
     
+                            } else {
+                                RedLedState = 1;
                             }
                         }
 
