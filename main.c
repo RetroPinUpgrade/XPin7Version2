@@ -990,8 +990,10 @@ void __interrupt() MainInterruptHandler(void) {
                         // If this is NOT a BASIC host, then we're going to 
                         // take the digits from the MPU without question and
                         // put them in the DisplayBuffer
-                        for (uint8_t displayCount=0; displayCount<5; displayCount++) {
-                            DisplayBuffer[displayCount][currentDigit] = CachedBCD[displayCount];
+                        if (ServiceMenuDisplayTest == 0) {
+                            for (uint8_t displayCount=0; displayCount<5; displayCount++) {
+                                DisplayBuffer[displayCount][currentDigit] = CachedBCD[displayCount];
+                            }
                         }
                     }
 
@@ -1201,6 +1203,13 @@ int main(void) {
                 } else {
                     BlankAllDisplays();
                 }
+            } else if (ServiceMenuDisplayTest) {
+                if (DisplayTestStartTime == 0) {
+                    DisplayTestStartTime = TicksSinceBoot;
+                    DisplayTestPhase = 0xFF;
+                }
+                SawBothTestTypes = 0x01; // Force the full 16-step test for the manual menu
+                ShowDisplayTest();
             } else if (HostDetected==XPIN_BASIC_HOST_FOUND) {
                 // If this is a basic host (in other words, the 7th digit is inferred)
                 // we need to track scores and HSTD
@@ -1239,12 +1248,12 @@ int main(void) {
 
                 if (ScanCompleteFlag) {
                     ScanCompleteFlag = 0;
-                    if (CapturedDisplayTestMode || ServiceMenuDisplayTest) {
+                    if (CapturedDisplayTestMode) {
                         if (DisplayTestStartTime==0) {
                             DisplayTestStartTime = TicksSinceBoot;
                             DisplayTestPhase = 0xFF;
                         }
-                        if (CapturedDisplayTestMode==0x02 || ServiceMenuDisplayTest) SawBothTestTypes = 0x01;
+                        if (CapturedDisplayTestMode==0x02) SawBothTestTypes = 0x01;
                         // We're going to show the test animation
                         // This will be based on how long it has been since the display test mode
                         // started, and what type of display test we're supposed to show (just 1111111, etc., 
@@ -1254,7 +1263,7 @@ int main(void) {
                         // Because we saw a test pattern on the digits,
                         // se're going to consider the MPU to be in
                         // the operator menu until the MPU is reset
-                        if (ServiceMenuDisplayTest==0) InOperatorMenu = 0x01;
+                        InOperatorMenu = 0x01;
                     } else {
                         if ((CapturedScoreStable&0x0F)==0x0F) {                            
                             // We're only going to update the DisplayBuffer if all the score
